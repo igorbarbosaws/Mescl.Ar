@@ -880,7 +880,7 @@ function switchPage(n) {
     document.getElementById(`page${i}`).classList.toggle('active', i === n);
     document.getElementById(`nav${i}`).classList.toggle('active', i === n);
   });
-  const subtitles = { 1: '— Consolidador', 2: '— Unificador' };
+  const subtitles = { 1: '— Consolidador de Dados', 2: '— Unificador de Sheets' };
   document.getElementById('pageTitle').innerHTML =
     `Mescl<em>.</em>ar <span style="font-weight:400;opacity:.5;font-size:.9em">${subtitles[n]}</span>`;
 }
