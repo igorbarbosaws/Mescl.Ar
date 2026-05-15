@@ -867,11 +867,15 @@ let unifFileCounter = 0;
 //   pct: undefined → captura qualquer valor numérico encontrado
 // ─────────────────────────────────────────────────────────────────────────────
 const FIELD_MAP = [
+  // ── Identificação ────────────────────────────────────────────────
   { key: 'Recibo',              re: /recibo/i },
   { key: 'Rota',                re: /\brota\b/i },
   { key: 'Data Emissão',        re: /recife[,\s]/i },
   { key: 'Percurso',            re: /percurso|trajeto/i },
-  { key: 'Valor Frete (R$)',    re: /valor\s+frete/i },
+
+  // ── Financeiro ───────────────────────────────────────────────────
+  // "Valor Frete" (Delta Plástico) e "Frete Peso" (Delta Porcelana)
+  { key: 'Valor Frete (R$)',    re: /valor\s+frete|frete\s+peso/i },
   { key: 'Dif. Diesel (R$)',    re: /diferen[cç]a\s+de\s+diesel|dif.*diesel/i },
   { key: 'Adiantamento (R$)',   re: /adiantamento/i },
   { key: 'Ad-valorem (%)',      re: /ad.?valorem/i,   pct: true  },
@@ -882,15 +886,25 @@ const FIELD_MAP = [
   { key: 'Taxa Adm. (R$)',      re: /taxa\s+adm/i,    pct: false },
   { key: 'ICMS (R$)',           re: /\bicms\b/i },
   { key: 'Saldo a Pagar (R$)',  re: /saldo\s+a\s+pagar/i },
-  { key: 'Total Frete Pago (R$)', re: /valor\s+total\s+frete\s+pago|total.*frete.*pago/i },
-  { key: 'Conhecimento/Fatura', re: /conhecimento\s*[\/e]\s*fatura|conhecimento|fatura/i },
+  // "Valor total frete pago" (Plástico) e "Frete Total R$" (Porcelana)
+  { key: 'Total Frete Pago (R$)', re: /valor\s+total\s+frete\s+pago|frete\s+total\s+r\$?|total.*frete.*pago/i },
+
+  // ── Análise ──────────────────────────────────────────────────────
+  // Conhecimento e Fatura podem vir juntos ou separados
+  { key: 'Conhecimento',        re: /^conhecimento\b/i },
+  { key: 'Fatura',              re: /^fatura\b/i },
   { key: 'Frete s/ ICMS (R$)',  re: /frete\s+s\/?\.?\s*icms/i },
   { key: 'Valor da Carga (R$)', re: /valor\s+da\s+carga/i },
   { key: 'Percentual (%)',      re: /percentual\s+que\s+representa|percentual/i },
-  { key: 'Notas Fiscais',       re: /notas?\s+fiscais?/i },
+  // "Notas Fiscais" (Plástico) e "N.Fiscal" (Porcelana)
+  { key: 'Notas Fiscais',       re: /notas?\s+fiscais?|n\.?\s*fiscal/i },
+  // "Peso" — exclusivo da Porcelana
+  { key: 'Peso (kg)',           re: /^peso\b/i },
   { key: 'Entregas',            re: /\bentrega\b/i },
   { key: 'KM',                  re: /\bkm\b/i },
-  { key: 'Tipo Veículo',        re: /tipo\s+ve[íi]culo/i },
+  // "Tipo Veículo" (Plástico) e "Tipo de Veiculo" (Porcelana)
+  { key: 'Tipo Veículo',        re: /tipo\s+(de\s+)?ve[íi]culo/i },
+  // CD: "CD-03", "cd-1", "CD 03" etc.
   { key: 'CD',                  re: /^cd[-\s]?\d+$/i },
 ];
 
@@ -903,8 +917,10 @@ const CANONICAL_COLS = [
   'Carga/Descarga (R$)', 'Pedágio (R$)',
   'Taxa Adm. (%)', 'Taxa Adm. (R$)',
   'ICMS (R$)', 'Saldo a Pagar (R$)', 'Total Frete Pago (R$)',
-  'Conhecimento/Fatura', 'Frete s/ ICMS (R$)', 'Valor da Carga (R$)',
-  'Percentual (%)', 'Notas Fiscais', 'Entregas', 'KM', 'Tipo Veículo', 'CD',
+  'Conhecimento', 'Fatura',
+  'Frete s/ ICMS (R$)', 'Valor da Carga (R$)',
+  'Percentual (%)', 'Notas Fiscais', 'Peso (kg)',
+  'Entregas', 'KM', 'Tipo Veículo', 'CD',
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -919,7 +935,8 @@ function parseFreightSheet(raw, fileName, sheetName) {
   rec['Aba']     = sheetName;
 
   // ── Cabeçalho: Recibo, Rota e Data nas primeiras linhas ──────────
-  for (let i = 0; i < Math.min(raw.length, 8); i++) {
+  // A Porcelana coloca a data na linha 1 antes do cabeçalho
+  for (let i = 0; i < Math.min(raw.length, 10); i++) {
     const line = (raw[i] || []).map(c => String(c ?? '').trim()).join(' ').trim();
 
     if (!rec['Recibo']) {
@@ -942,12 +959,29 @@ function parseFreightSheet(raw, fileName, sheetName) {
     const labelRaw = String(row[0] ?? row[1] ?? '').trim();
     if (!labelRaw) continue;
 
-    // Percurso: "Percurso: Recife PE / Garanhuns PE"
+    // Percurso: "Percurso: Recife PE / Garanhuns PE" ou "Percurso: Moreno / ..."
     if (/percurso/i.test(labelRaw) && !rec['Percurso']) {
       const full = row.map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
       const m = full.match(/percurso\s*:\s*(.+)/i);
       if (m) rec['Percurso'] = m[1].trim();
       continue;
+    }
+
+    // "Frete Total R$" (Porcelana) — o valor está na col C (índice 2 ou 3)
+    // A linha tem formato: "" | "Frete Total R$" | valor
+    // Também pode aparecer como col A vazia e col B = "Frete Total R$"
+    if (/frete\s+total\s+r\$?/i.test(labelRaw) && !rec['Total Frete Pago (R$)']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim())
+        .find(c => /^[\d.,]+$/.test(c.replace(/\s/g, '')));
+      if (v) rec['Total Frete Pago (R$)'] = v;
+      continue;
+    }
+    // Também pode estar na col B quando col A está vazia
+    const labelB = String(row[1] ?? '').trim();
+    if (/frete\s+total\s+r\$?/i.test(labelB) && !rec['Total Frete Pago (R$)']) {
+      const v = row.slice(2).map(c => String(c ?? '').trim())
+        .find(c => /^[\d.,]+$/.test(c.replace(/\s/g, '')));
+      if (v) rec['Total Frete Pago (R$)'] = v;
     }
 
     // Extrai valor monetário e percentual das colunas B em diante
@@ -962,40 +996,63 @@ function parseFreightSheet(raw, fileName, sheetName) {
     // Casa o rótulo com o mapa de campos
     for (const field of FIELD_MAP) {
       if (!field.re.test(labelRaw)) continue;
-      if (field.pct === true)  { if (valPct && !rec[field.key]) rec[field.key] = valPct; }
-      else if (field.pct === false) { if (valBRL && !rec[field.key]) rec[field.key] = valBRL; }
+      if (field.pct === true)        { if (valPct && !rec[field.key]) rec[field.key] = valPct; }
+      else if (field.pct === false)  { if (valBRL && !rec[field.key]) rec[field.key] = valBRL; }
       else {
         const val = valBRL || valPct;
         if (val && !rec[field.key]) rec[field.key] = val;
       }
     }
 
-    // Campos de texto livre — Conhecimento/Fatura
-    if (/conhecimento\s*[\/e]\s*fatura|conhecimento|fatura/i.test(labelRaw) && !rec['Conhecimento/Fatura']) {
-      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' / ');
-      if (v) rec['Conhecimento/Fatura'] = v;
+    // ── Campos de texto livre ────────────────────────────────────────
+
+    // Conhecimento/Fatura — Delta Plástico: "Conhecimento / Fatura" numa linha só
+    // Delta Porcelana: "Conhecimento:" e "Fatura:" em linhas separadas
+    if (/conhecimento\s*[\/e]\s*fatura/i.test(labelRaw)) {
+      // Formato combinado: extrai tudo e divide pelo "/"
+      const full = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' / ');
+      const parts = full.split(/\s*\/\s*/);
+      if (!rec['Conhecimento'] && parts[0]) rec['Conhecimento'] = parts[0];
+      if (!rec['Fatura']       && parts[1]) rec['Fatura']       = parts[1];
+    } else if (/^conhecimento\b/i.test(labelRaw) && !rec['Conhecimento']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
+      if (v) rec['Conhecimento'] = v;
+    } else if (/^fatura\b/i.test(labelRaw) && !rec['Fatura']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
+      if (v) rec['Fatura'] = v;
     }
-    // Notas Fiscais
-    if (/notas?\s+fiscais?/i.test(labelRaw) && !rec['Notas Fiscais']) {
+
+    // Notas Fiscais / N.Fiscal
+    if (/notas?\s+fiscais?|n\.?\s*fiscal/i.test(labelRaw) && !rec['Notas Fiscais']) {
       const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(', ');
       if (v) rec['Notas Fiscais'] = v;
     }
+
+    // Peso (exclusivo Porcelana)
+    if (/^peso\b/i.test(labelRaw) && !rec['Peso (kg)']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
+      if (v) rec['Peso (kg)'] = v;
+    }
+
     // Entrega
     if (/\bentrega\b/i.test(labelRaw) && !rec['Entregas']) {
       const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
       if (v) rec['Entregas'] = v;
     }
+
     // KM
     if (/\bkm\b/i.test(labelRaw) && !rec['KM']) {
       const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
       if (v) rec['KM'] = v;
     }
-    // Tipo Veículo
-    if (/tipo\s+ve[íi]culo/i.test(labelRaw) && !rec['Tipo Veículo']) {
+
+    // Tipo Veículo — "Tipo Veiculo:" e "Tipo de Veiculo:"
+    if (/tipo\s+(de\s+)?ve[íi]culo/i.test(labelRaw) && !rec['Tipo Veículo']) {
       const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
       if (v) rec['Tipo Veículo'] = v;
     }
-    // CD (ex: "CD-03" aparece como rótulo sem valor)
+
+    // CD — "CD-03", "cd-1", "CD 03" etc.
     if (/^cd[-\s]?\d+$/i.test(labelRaw) && !rec['CD']) {
       rec['CD'] = labelRaw;
     }
@@ -1009,6 +1066,9 @@ function parseFreightSheet(raw, fileName, sheetName) {
       if (m) { rec['Percentual (%)'] = m[1]; break; }
     }
   }
+
+  // Consolida Conhecimento/Fatura: se um dos dois está vazio, tenta preencher
+  // com o que veio da linha combinada (já tratado acima)
 
   return rec;
 }
@@ -1149,8 +1209,9 @@ function _runUnify(files) {
 
       const rec = parseFreightSheet(raw, file.name, sheetName);
 
-      // Inclui apenas abas com dados relevantes
-      const hasData = rec['Recibo'] || rec['Valor Frete (R$)'] || rec['Percurso'] || rec['Conhecimento/Fatura'];
+      // Inclui apenas abas com dados relevantes (qualquer formato)
+      const hasData = rec['Recibo'] || rec['Valor Frete (R$)'] || rec['Percurso']
+                   || rec['Conhecimento'] || rec['Fatura'] || rec['Total Frete Pago (R$)'];
       if (hasData) result.push(rec);
 
       processed++;
@@ -1299,4 +1360,4 @@ function onSimThresholdChange(val) {
   if (el) el.textContent = val + '%';
 }
 
-
+
