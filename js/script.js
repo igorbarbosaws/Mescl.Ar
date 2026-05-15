@@ -844,29 +844,178 @@ function switchPage(n) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PAGE 2 — EXTRATOR AUTOMÁTICO: STATE
+// PAGE 2 — EXTRATOR DE RELATÓRIOS DE FRETE (FORMATO VERTICAL)
+// Lê múltiplas planilhas com múltiplas abas, extrai campos de formulários
+// verticais (col A = rótulo, col B/C = valor) e consolida em uma tabela.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/*
-  COMO FUNCIONA O MOTOR AUTOMÁTICO:
-  1. Para cada arquivo carregado, varre TODAS as abas automaticamente
-  2. Em cada aba, percorre TODAS as linhas procurando a "linha de cabeçalho"
-     (a linha mais densa em texto, sem ser a linha de título geral)
-  3. Coleta todos os nomes de campos encontrados
-  4. Agrupa campos com nomes semelhantes (Jaro-Winkler) numa única coluna
-  5. Constrói a tabela resultado com 1 linha por "bloco de dados" encontrado
-*/
-
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE — página 2
+// ─────────────────────────────────────────────────────────────────────────────
 const unifState = {
-  files: [],      // [{ id, name, wb, sheets:[{sheetName, hRow, headers, data}] }]
-  fields: [],     // [{ id, label, sources:[{fileId,sheetName,colIdx}] }]
+  files: [],    // [{ id, name, wb }]
   result: [],
   filtered: [],
 };
-let unifFileCounter  = 0;
-let unifFieldCounter = 0;
+let unifFileCounter = 0;
 
-// ─── DRAG & DROP ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MAPA DE CAMPOS — rótulos das planilhas → nome canônico da coluna de saída
+// Cada entrada: { key, re, pct? }
+//   pct: true  → captura o valor percentual da linha
+//   pct: false → captura o valor monetário da linha
+//   pct: undefined → captura qualquer valor numérico encontrado
+// ─────────────────────────────────────────────────────────────────────────────
+const FIELD_MAP = [
+  { key: 'Recibo',              re: /recibo/i },
+  { key: 'Rota',                re: /\brota\b/i },
+  { key: 'Data Emissão',        re: /recife[,\s]/i },
+  { key: 'Percurso',            re: /percurso|trajeto/i },
+  { key: 'Valor Frete (R$)',    re: /valor\s+frete/i },
+  { key: 'Dif. Diesel (R$)',    re: /diferen[cç]a\s+de\s+diesel|dif.*diesel/i },
+  { key: 'Adiantamento (R$)',   re: /adiantamento/i },
+  { key: 'Ad-valorem (%)',      re: /ad.?valorem/i,   pct: true  },
+  { key: 'Ad-valorem (R$)',     re: /ad.?valorem/i,   pct: false },
+  { key: 'Carga/Descarga (R$)', re: /carga\s*[\/e]\s*descarga|carga\s*desc/i },
+  { key: 'Pedágio (R$)',        re: /ped[aá]gio/i },
+  { key: 'Taxa Adm. (%)',       re: /taxa\s+adm/i,    pct: true  },
+  { key: 'Taxa Adm. (R$)',      re: /taxa\s+adm/i,    pct: false },
+  { key: 'ICMS (R$)',           re: /\bicms\b/i },
+  { key: 'Saldo a Pagar (R$)',  re: /saldo\s+a\s+pagar/i },
+  { key: 'Total Frete Pago (R$)', re: /valor\s+total\s+frete\s+pago|total.*frete.*pago/i },
+  { key: 'Conhecimento/Fatura', re: /conhecimento\s*[\/e]\s*fatura|conhecimento|fatura/i },
+  { key: 'Frete s/ ICMS (R$)',  re: /frete\s+s\/?\.?\s*icms/i },
+  { key: 'Valor da Carga (R$)', re: /valor\s+da\s+carga/i },
+  { key: 'Percentual (%)',      re: /percentual\s+que\s+representa|percentual/i },
+  { key: 'Notas Fiscais',       re: /notas?\s+fiscais?/i },
+  { key: 'Entregas',            re: /\bentrega\b/i },
+  { key: 'KM',                  re: /\bkm\b/i },
+  { key: 'Tipo Veículo',        re: /tipo\s+ve[íi]culo/i },
+  { key: 'CD',                  re: /^cd[-\s]?\d+$/i },
+];
+
+// Ordem das colunas no resultado final
+const CANONICAL_COLS = [
+  'Arquivo', 'Aba',
+  'Recibo', 'Rota', 'Data Emissão', 'Percurso',
+  'Valor Frete (R$)', 'Dif. Diesel (R$)', 'Adiantamento (R$)',
+  'Ad-valorem (%)', 'Ad-valorem (R$)',
+  'Carga/Descarga (R$)', 'Pedágio (R$)',
+  'Taxa Adm. (%)', 'Taxa Adm. (R$)',
+  'ICMS (R$)', 'Saldo a Pagar (R$)', 'Total Frete Pago (R$)',
+  'Conhecimento/Fatura', 'Frete s/ ICMS (R$)', 'Valor da Carga (R$)',
+  'Percentual (%)', 'Notas Fiscais', 'Entregas', 'KM', 'Tipo Veículo', 'CD',
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PARSER DE ABA VERTICAL
+// Cada aba é um formulário: col A = rótulo, col B/C = valor (às vezes % na col C)
+// Retorna um objeto com os campos canônicos preenchidos.
+// ─────────────────────────────────────────────────────────────────────────────
+function parseFreightSheet(raw, fileName, sheetName) {
+  const rec = {};
+  CANONICAL_COLS.forEach(c => { rec[c] = ''; });
+  rec['Arquivo'] = fileName;
+  rec['Aba']     = sheetName;
+
+  // ── Cabeçalho: Recibo, Rota e Data nas primeiras linhas ──────────
+  for (let i = 0; i < Math.min(raw.length, 8); i++) {
+    const line = (raw[i] || []).map(c => String(c ?? '').trim()).join(' ').trim();
+
+    if (!rec['Recibo']) {
+      const m = line.match(/recibo\s+([\d]+\s*\/\s*[\d]+)/i);
+      if (m) rec['Recibo'] = m[1].replace(/\s/g, '');
+    }
+    if (!rec['Rota']) {
+      const m = line.match(/rota\s+([\d]+\s*\/\s*[\d]+)/i);
+      if (m) rec['Rota'] = m[1].replace(/\s/g, '');
+    }
+    if (!rec['Data Emissão']) {
+      const m = line.match(/recife[,\s]+(\d{1,2}\s+de\s+\w+\s+de\s+\d{4})/i);
+      if (m) rec['Data Emissão'] = m[1];
+    }
+  }
+
+  // ── Varredura linha a linha ──────────────────────────────────────
+  for (let i = 0; i < raw.length; i++) {
+    const row      = raw[i] || [];
+    const labelRaw = String(row[0] ?? row[1] ?? '').trim();
+    if (!labelRaw) continue;
+
+    // Percurso: "Percurso: Recife PE / Garanhuns PE"
+    if (/percurso/i.test(labelRaw) && !rec['Percurso']) {
+      const full = row.map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
+      const m = full.match(/percurso\s*:\s*(.+)/i);
+      if (m) rec['Percurso'] = m[1].trim();
+      continue;
+    }
+
+    // Extrai valor monetário e percentual das colunas B em diante
+    let valBRL = '', valPct = '';
+    for (let c = 1; c < row.length; c++) {
+      const cell = String(row[c] ?? '').trim();
+      if (!cell) continue;
+      if (/^\d[\d.,]*%$/.test(cell) && !valPct) { valPct = cell; continue; }
+      if (/^[\d.,]+$/.test(cell.replace(/\s/g, '')) && !valBRL) { valBRL = cell; continue; }
+    }
+
+    // Casa o rótulo com o mapa de campos
+    for (const field of FIELD_MAP) {
+      if (!field.re.test(labelRaw)) continue;
+      if (field.pct === true)  { if (valPct && !rec[field.key]) rec[field.key] = valPct; }
+      else if (field.pct === false) { if (valBRL && !rec[field.key]) rec[field.key] = valBRL; }
+      else {
+        const val = valBRL || valPct;
+        if (val && !rec[field.key]) rec[field.key] = val;
+      }
+    }
+
+    // Campos de texto livre — Conhecimento/Fatura
+    if (/conhecimento\s*[\/e]\s*fatura|conhecimento|fatura/i.test(labelRaw) && !rec['Conhecimento/Fatura']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' / ');
+      if (v) rec['Conhecimento/Fatura'] = v;
+    }
+    // Notas Fiscais
+    if (/notas?\s+fiscais?/i.test(labelRaw) && !rec['Notas Fiscais']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(', ');
+      if (v) rec['Notas Fiscais'] = v;
+    }
+    // Entrega
+    if (/\bentrega\b/i.test(labelRaw) && !rec['Entregas']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
+      if (v) rec['Entregas'] = v;
+    }
+    // KM
+    if (/\bkm\b/i.test(labelRaw) && !rec['KM']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
+      if (v) rec['KM'] = v;
+    }
+    // Tipo Veículo
+    if (/tipo\s+ve[íi]culo/i.test(labelRaw) && !rec['Tipo Veículo']) {
+      const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join('');
+      if (v) rec['Tipo Veículo'] = v;
+    }
+    // CD (ex: "CD-03" aparece como rótulo sem valor)
+    if (/^cd[-\s]?\d+$/i.test(labelRaw) && !rec['CD']) {
+      rec['CD'] = labelRaw;
+    }
+  }
+
+  // Percentual — fallback: busca "X.XX%" em qualquer linha
+  if (!rec['Percentual (%)']) {
+    for (const row of raw) {
+      const line = (row || []).map(c => String(c ?? '').trim()).join(' ');
+      const m = line.match(/percentual\s+que\s+representa[^\d]*([\d.,]+%)/i);
+      if (m) { rec['Percentual (%)'] = m[1]; break; }
+    }
+  }
+
+  return rec;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAG & DROP / UPLOAD
+// ─────────────────────────────────────────────────────────────────────────────
 function handleUnifDrop(e) {
   e.preventDefault();
   document.getElementById('unifDropZone').classList.remove('drag-over');
@@ -876,57 +1025,21 @@ function handleUnifDrop(e) {
 function loadUnifFiles(fileList) {
   Array.from(fileList).forEach(file => {
     const id    = ++unifFileCounter;
-    const entry = { id, name: file.name, wb: null, sheets: [] };
+    const entry = { id, name: file.name, wb: null };
     unifState.files.push(entry);
     renderUnifFileCard(entry);
+
     readWorkbook(file, wb => {
       entry.wb = wb;
-      // ── Scan ALL sheets automatically ──────────────────────────────
-      entry.sheets = [];
-      wb.SheetNames.forEach(sheetName => {
-        const ws  = wb.Sheets[sheetName];
-        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: false });
-        if (!raw || raw.length < 2) return;
-
-        // Auto-detect header row: find row with most non-empty text cells (likely the header)
-        const hRow = detectHeaderRow(raw);
-        const headers = (raw[hRow] || []).map(h => String(h).trim()).filter(Boolean);
-        const data    = raw.slice(hRow + 1).filter(r => r.some(c => c !== '' && c !== null && c !== undefined));
-
-        if (headers.length === 0 || data.length === 0) return;
-        entry.sheets.push({ sheetName, hRow, headers, data });
-      });
-
-      // Update card meta
+      const sheetCount = wb.SheetNames.length;
       const meta = document.getElementById(`uf-meta-${id}`);
-      const totalRows  = entry.sheets.reduce((s, sh) => s + sh.data.length, 0);
-      const totalSheets = entry.sheets.length;
-      if (meta) meta.textContent = `${totalSheets} aba(s) · ${totalRows} linhas`;
+      if (meta) meta.textContent = `${sheetCount} aba(s) — pronto`;
       document.getElementById(`uf-card-${id}`)?.classList.add('loaded');
-
-      toast(`${file.name} — ${totalSheets} aba(s), ${totalRows} linhas`, 'ok');
-      redetectFields();
+      toast(`${file.name} — ${sheetCount} aba(s) carregada(s)`, 'ok');
+      updateUnifReadyState();
     });
   });
   setUnifStep(1);
-}
-
-/**
- * Auto-detect the best header row in a raw 2D array.
- * Heuristic: look for the row with the most non-empty string cells
- * that is NOT mostly numeric. Check first 10 rows only.
- */
-function detectHeaderRow(raw) {
-  let bestRow = 0, bestScore = -1;
-  const checkRows = Math.min(raw.length - 1, 10);
-  for (let i = 0; i < checkRows; i++) {
-    const row  = raw[i] || [];
-    const nonEmpty = row.filter(c => c !== '' && c !== null && c !== undefined);
-    const textCount = nonEmpty.filter(c => isNaN(parseFloat(String(c)))).length;
-    const score = textCount * 2 + nonEmpty.length;
-    if (score > bestScore) { bestScore = score; bestRow = i; }
-  }
-  return bestRow;
 }
 
 function renderUnifFileCard(entry) {
@@ -934,7 +1047,7 @@ function renderUnifFileCard(entry) {
   const card = document.createElement('div');
   card.className = 'unif-file-card';
   card.id = `uf-card-${entry.id}`;
-  const shortName = entry.name.length > 28 ? entry.name.slice(0,26)+'…' : entry.name;
+  const shortName = entry.name.length > 28 ? entry.name.slice(0, 26) + '…' : entry.name;
   card.innerHTML = `
     <div class="unif-file-top">
       <div class="unif-file-icon">📄</div>
@@ -950,159 +1063,67 @@ function renderUnifFileCard(entry) {
 function removeUnifFile(id) {
   unifState.files = unifState.files.filter(f => f.id !== id);
   document.getElementById(`uf-card-${id}`)?.remove();
-  redetectFields();
+  updateUnifReadyState();
+  toast('Arquivo removido', 'ok');
 }
 
-// ─── FIELD DETECTION ENGINE ───────────────────────────────────────────────────
+function updateUnifReadyState() {
+  const loadedFiles = unifState.files.filter(f => f.wb !== null);
+  const ready = loadedFiles.length > 0;
+  const btnUnif = document.getElementById('btnUnif');
+  if (btnUnif) btnUnif.disabled = !ready;
 
-/**
- * strSimilarity: Jaro-Winkler + domain normalization for freight terms.
- * Returns 0–1.
- */
-function strSimilarity(a, b) {
-  // Normalize freight-specific synonyms first
-  const normFreight = s => s.toLowerCase()
-    .replace(/conhecimento[^a-z]*(de[^a-z]*frete|fatura)?s?/gi, 'ctefatura')
-    .replace(/\bcte\b/gi, 'ctefatura')
-    .replace(/\bfatura\b/gi, 'ctefatura')
-    .replace(/notas?\s*fiscais?/gi, 'notafiscal')
-    .replace(/\bnfs?\b/gi, 'notafiscal')
-    .replace(/valor\s*(da\s*)?(carga|mercadoria)/gi, 'valorcarga')
-    .replace(/frete\s*(s\/?|com\s*)?icms?/gi, 'fretericms')
-    .replace(/frete\s*s\/?icms?/gi, 'fretesicms')
-    .replace(/percurso|rota|trajeto|destino/gi, 'percurso')
-    .replace(/adiantamento|antecipo/gi, 'adiantamento')
-    .replace(/saldo\s*(a\s*pagar)?/gi, 'saldopagar')
-    .replace(/tipo\s*(de\s*)?ve[íi]culo/gi, 'tipoveiculo')
-    .replace(/[^a-z0-9]/gi, '');
+  if (ready) {
+    const totalSheets = loadedFiles.reduce((s, f) => s + f.wb.SheetNames.length, 0);
+    document.getElementById('unifProcessTitle').textContent = 'Pronto para consolidar';
+    document.getElementById('unifProcessSub').textContent =
+      `${loadedFiles.length} planilha(s) · ${totalSheets} aba(s) detectada(s) — clique Consolidar.`;
+    document.getElementById('unifDetectedSection').style.display = 'block';
 
-  const na = normFreight(a);
-  const nb = normFreight(b);
-  if (na === nb) return 1;
-  if (!na || !nb) return 0;
-
-  // Exact match after normalization
-  const len = Math.max(na.length, nb.length);
-  const matchDist = Math.max(0, Math.floor(len / 2) - 1);
-  const aM = new Array(na.length).fill(false);
-  const bM = new Array(nb.length).fill(false);
-  let matches = 0, transp = 0;
-  for (let i = 0; i < na.length; i++) {
-    const s = Math.max(0, i - matchDist);
-    const e = Math.min(i + matchDist + 1, nb.length);
-    for (let j = s; j < e; j++) {
-      if (bM[j] || na[i] !== nb[j]) continue;
-      aM[i] = bM[j] = true; matches++; break;
-    }
-  }
-  if (!matches) return 0;
-  let k = 0;
-  for (let i = 0; i < na.length; i++) {
-    if (!aM[i]) continue;
-    while (!bM[k]) k++;
-    if (na[i] !== nb[k]) transp++;
-    k++;
-  }
-  const jaro = (matches/na.length + matches/nb.length + (matches - transp/2)/matches) / 3;
-  let prefix = 0;
-  for (let i = 0; i < Math.min(4, na.length, nb.length); i++) {
-    if (na[i] === nb[i]) prefix++; else break;
-  }
-  return jaro + prefix * 0.1 * (1 - jaro);
-}
-
-function onSimThresholdChange(val) {
-  document.getElementById('simThresholdVal').textContent = val + '%';
-}
-
-function resetAndRedetect() {
-  unifState.fields = [];
-  redetectFields();
-}
-
-function redetectFields() {
-  unifState.fields = [];
-  const files = unifState.files.filter(f => f.sheets.length > 0);
-  if (!files.length) {
+    // Atualiza tags de campos detectados
+    renderDetectedFieldTags(loadedFiles);
+    setUnifStep(2);
+  } else {
     document.getElementById('unifDetectedSection').style.display = 'none';
-    return;
+    setUnifStep(1);
   }
-
-  const threshold = parseInt(document.getElementById('simThreshold')?.value || 72) / 100;
-
-  // Collect every (fileId, sheetName, colIdx, headerName) tuple
-  const allCols = [];
-  files.forEach(f => {
-    f.sheets.forEach(sh => {
-      sh.headers.forEach((h, i) => {
-        if (h && h.trim()) allCols.push({ fileId: f.id, sheetName: sh.sheetName, colIdx: i, name: h.trim() });
-      });
-    });
-  });
-
-  // Greedy grouping by similarity
-  const fields = [];
-  allCols.forEach(col => {
-    let bestField = null, bestScore = 0;
-    fields.forEach(field => {
-      const score = strSimilarity(col.name, field.label);
-      if (score > bestScore) { bestScore = score; bestField = field; }
-    });
-
-    if (bestField && bestScore >= threshold) {
-      // Only add if this exact (file+sheet+col) combo not already in it
-      const already = bestField.sources.some(s => s.fileId===col.fileId && s.sheetName===col.sheetName && s.colIdx===col.colIdx);
-      if (!already) bestField.sources.push({ fileId:col.fileId, sheetName:col.sheetName, colIdx:col.colIdx });
-    } else {
-      fields.push({
-        id: ++unifFieldCounter,
-        label: col.name,
-        sources: [{ fileId:col.fileId, sheetName:col.sheetName, colIdx:col.colIdx }],
-      });
-    }
-  });
-
-  unifState.fields = fields;
-  renderDetectedTags(fields, files);
-  document.getElementById('unifDetectedSection').style.display = 'block';
-  setUnifStep(2);
-  document.getElementById('unifDetectedCount').textContent =
-    `${fields.length} campos · ${allCols.length} ocorrências em ${files.reduce((s,f)=>s+f.sheets.length,0)} aba(s)`;
-  document.getElementById('unifProcessTitle').textContent = 'Pronto para consolidar';
-  document.getElementById('unifProcessSub').textContent   = `${fields.length} campos detectados em ${files.length} planilha(s) — clique Consolidar.`;
 }
 
-function renderDetectedTags(fields, files) {
-  const wrap = document.getElementById('unifDetectedTags');
-  const BADGE_COLORS = ['#4361ee','#0a9e6e','#7c3aed','#d97706','#0096c7','#f43f5e','#84cc16'];
-  wrap.innerHTML = fields.map((f, idx) => {
-    const filesWithField = [...new Set(f.sources.map(s => s.fileId))].length;
-    const color = BADGE_COLORS[idx % BADGE_COLORS.length];
-    return `<span style="
-      display:inline-flex;align-items:center;gap:6px;
-      padding:5px 12px;border-radius:20px;font-size:0.72rem;font-family:var(--mono);
-      background:${color}18;border:1px solid ${color}44;color:${color};
-      cursor:default" title="Encontrado em ${f.sources.length} coluna(s) de ${filesWithField} planilha(s)">
-      ${escHtml(f.label)}
-      <span style="opacity:.6;font-size:.65rem">${f.sources.length}×</span>
-    </span>`;
-  }).join('');
+// Mostra as tags dos campos que serão extraídos
+function renderDetectedFieldTags(loadedFiles) {
+  const tagsEl = document.getElementById('unifDetectedTags');
+  const countEl = document.getElementById('unifDetectedCount');
+  if (!tagsEl) return;
+
+  const fieldCount = CANONICAL_COLS.length - 2; // exclui Arquivo e Aba
+  if (countEl) countEl.textContent = `${fieldCount} campos · ${loadedFiles.length} planilha(s)`;
+
+  tagsEl.innerHTML = CANONICAL_COLS
+    .filter(c => c !== 'Arquivo' && c !== 'Aba')
+    .map(c => `<span style="
+      display:inline-flex;align-items:center;gap:5px;
+      padding:4px 10px;border-radius:20px;font-size:0.7rem;font-family:var(--mono);
+      background:var(--cyan-dim);border:1px solid rgba(0,150,199,0.2);color:var(--cyan)
+    ">✦ ${escHtml(c)}</span>`)
+    .join('');
 }
 
-// ─── CONSOLIDATION ENGINE ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MOTOR DE CONSOLIDAÇÃO — página 2
+// ─────────────────────────────────────────────────────────────────────────────
 function runUnify() {
-  const files = unifState.files.filter(f => f.sheets.length > 0);
+  const files = unifState.files.filter(f => f.wb !== null);
   if (!files.length) { toast('Nenhuma planilha carregada', 'err'); return; }
-  if (!unifState.fields.length) { toast('Nenhum campo detectado', 'err'); return; }
 
   setUnifStep(3);
   unifProgress(0, true);
   document.getElementById('unifProcessTitle').textContent = 'Consolidando…';
+  document.getElementById('unifProcessSub').textContent   = 'Varrendo abas…';
 
   setTimeout(() => {
     try {
       _runUnify(files);
-    } catch(e) {
+    } catch (e) {
       toast('Erro: ' + e.message, 'err');
       console.error(e);
       unifProgress(0, false);
@@ -1111,27 +1132,27 @@ function runUnify() {
 }
 
 function _runUnify(files) {
-  const fields  = unifState.fields;
-  const result  = [];
-  let processed = 0;
-  const totalSheets = files.reduce((s, f) => s + f.sheets.length, 0);
+  const result = [];
+  let totalSheets = 0;
+  let processed   = 0;
+
+  files.forEach(f => { totalSheets += f.wb.SheetNames.length; });
 
   files.forEach(file => {
-    file.sheets.forEach(sheet => {
-      sheet.data.forEach(row => {
-        const outRow = {
-          _source: file.name,
-          _aba: sheet.sheetName,
-        };
-        fields.forEach(field => {
-          // Find source for this exact (file+sheet) combo
-          const src = field.sources.find(s => s.fileId === file.id && s.sheetName === sheet.sheetName);
-          outRow[field.label] = src !== undefined ? String(row[src.colIdx] ?? '').trim() : '';
-        });
-        // Only add row if it has at least one non-empty field value
-        const hasData = fields.some(f => outRow[f.label] !== '');
-        if (hasData) result.push(outRow);
+    file.wb.SheetNames.forEach(sheetName => {
+      const ws  = file.wb.Sheets[sheetName];
+      const raw = XLSX.utils.sheet_to_json(ws, {
+        header: 1, defval: '', blankrows: false, raw: false,
       });
+
+      if (!raw || raw.length < 3) { processed++; return; }
+
+      const rec = parseFreightSheet(raw, file.name, sheetName);
+
+      // Inclui apenas abas com dados relevantes
+      const hasData = rec['Recibo'] || rec['Valor Frete (R$)'] || rec['Percurso'] || rec['Conhecimento/Fatura'];
+      if (hasData) result.push(rec);
+
       processed++;
       unifProgress(Math.round((processed / totalSheets) * 90));
     });
@@ -1141,49 +1162,67 @@ function _runUnify(files) {
   unifState.result   = result;
   unifState.filtered = result;
 
-  // Stats
+  // Conta campos vazios para o stat
   const emptyCount = result.reduce((s, row) =>
-    s + fields.filter(f => row[f.label] === '').length, 0);
+    s + CANONICAL_COLS.filter(c => c !== 'Arquivo' && c !== 'Aba' && !row[c]).length, 0);
+
   document.getElementById('usvTotal').textContent  = result.length;
   document.getElementById('usvFiles').textContent  = `${files.length} · ${totalSheets}`;
-  document.getElementById('usvCols').textContent   = fields.length;
+  document.getElementById('usvCols').textContent   = CANONICAL_COLS.length - 2;
   document.getElementById('usvEmpty').textContent  = emptyCount;
   document.getElementById('unifStatsGrid').style.display = 'grid';
 
   renderUnifTable(result);
   document.getElementById('unifResultsHdr').style.display = 'flex';
+  document.getElementById('unifTableOuter').style.display = 'block';
   document.getElementById('btnUnifExport').style.display  = 'inline-flex';
   setUnifStep(4);
 
-  document.getElementById('unifProcessTitle').textContent = `Consolidado — ${result.length} linhas`;
-  document.getElementById('unifProcessSub').textContent   = `${fields.length} campos · ${totalSheets} aba(s) de ${files.length} planilha(s)`;
-  toast(`Concluído — ${result.length} linhas · ${fields.length} campos`, 'ok');
+  document.getElementById('unifProcessTitle').textContent = `Consolidado — ${result.length} registros`;
+  document.getElementById('unifProcessSub').textContent   =
+    `${CANONICAL_COLS.length - 2} campos · ${totalSheets} aba(s) de ${files.length} planilha(s)`;
+  toast(`Concluído — ${result.length} registros extraídos`, 'ok');
   setTimeout(() => unifProgress(0, false), 800);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TABELA — página 2
+// ─────────────────────────────────────────────────────────────────────────────
 function renderUnifTable(rows) {
   const outer = document.getElementById('unifTableOuter');
+  const thead = document.getElementById('unifTHead');
+  const tbody = document.getElementById('unifTBody');
   if (!rows.length) { outer.style.display = 'none'; return; }
   outer.style.display = 'block';
 
-  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  // Mostra apenas colunas que têm ao menos um valor preenchido
+  const activeCols = CANONICAL_COLS.filter(col =>
+    rows.some(r => r[col] && String(r[col]).trim() !== '')
+  );
 
-  document.getElementById('unifTHead').innerHTML = '<tr>'
-    + '<th style="color:var(--muted2);white-space:nowrap">ARQUIVO</th>'
-    + '<th style="color:var(--muted2);white-space:nowrap">ABA</th>'
-    + keys.map(k => `<th class="th-lookup">${escHtml(k)}</th>`).join('')
+  thead.innerHTML = '<tr>'
+    + activeCols.map(k => {
+        const isSource = k === 'Arquivo' || k === 'Aba';
+        return `<th style="color:${isSource ? 'var(--muted2)' : 'var(--cyan)'};white-space:nowrap">${escHtml(k)}</th>`;
+      }).join('')
     + '</tr>';
 
-  document.getElementById('unifTBody').innerHTML = rows.slice(0, 3000).map(row =>
+  tbody.innerHTML = rows.slice(0, 3000).map(row =>
     '<tr>'
-    + `<td style="font-size:.68rem;color:var(--muted);white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(row._source)}">${escHtml(row._source)}</td>`
-    + `<td style="font-size:.68rem;color:var(--cyan);white-space:nowrap">${escHtml(row._aba||'')}</td>`
-    + keys.map(k => `<td title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('')
+    + activeCols.map(k => {
+        const v = String(row[k] ?? '').trim();
+        const isSource = k === 'Arquivo' || k === 'Aba';
+        const style = isSource
+          ? 'font-size:.68rem;color:var(--muted);white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis'
+          : '';
+        return `<td style="${style}" title="${escHtml(v)}">${escHtml(v)}</td>`;
+      }).join('')
     + '</tr>'
   ).join('');
 
   if (rows.length > 3000) {
-    document.getElementById('unifTBody').innerHTML += `<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:16px;font-family:var(--mono);font-size:.72rem">…+${rows.length-3000} linhas. Exporte para ver tudo.</td></tr>`;
+    tbody.innerHTML +=
+      `<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:16px;font-family:var(--mono);font-size:.72rem">…+${rows.length - 3000} linhas. Exporte para ver tudo.</td></tr>`;
   }
 }
 
@@ -1195,56 +1234,69 @@ function unifSearch(val) {
   renderUnifTable(unifState.filtered);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPORTAR — página 2
+// ─────────────────────────────────────────────────────────────────────────────
 function exportUnif() {
   const rows = unifState.filtered;
   if (!rows.length) { toast('Nada para exportar', 'err'); return; }
 
-  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const activeCols = CANONICAL_COLS.filter(col =>
+    rows.some(r => r[col] && String(r[col]).trim() !== '')
+  );
 
   const exportData = rows.map(r => {
-    const obj = { ARQUIVO: r._source, ABA: r._aba };
-    keys.forEach(k => { obj[k] = r[k]; });
+    const obj = {};
+    activeCols.forEach(k => { obj[k] = r[k] ?? ''; });
     return obj;
   });
 
-  const ws  = XLSX.utils.json_to_sheet(exportData);
-  ws['!cols'] = Array(Object.keys(exportData[0]).length).fill({ wch: 24 });
-
-  // Bold header row
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-  for (let C = range.s.c; C <= range.e.c; C++) {
-    const cell = ws[XLSX.utils.encode_cell({ r: 0, c: C })];
-    if (cell) cell.s = { font: { bold: true } };
-  }
+  const ws = XLSX.utils.json_to_sheet(exportData);
+  ws['!cols'] = activeCols.map(k => ({ wch: Math.max(k.length + 2, 18) }));
 
   const wb2 = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb2, ws, 'Consolidado');
+  XLSX.utils.book_append_sheet(wb2, ws, 'Fretes Consolidados');
+
+  const loadedFiles = unifState.files.filter(f => f.wb !== null);
   XLSX.utils.book_append_sheet(wb2, XLSX.utils.json_to_sheet([
-    { Métrica: 'Total de linhas',    Valor: unifState.result.length },
-    { Métrica: 'Planilhas',          Valor: unifState.files.length },
-    { Métrica: 'Abas varridas',      Valor: unifState.files.reduce((s,f)=>s+f.sheets.length,0) },
-    { Métrica: 'Campos detectados',  Valor: unifState.fields.length },
+    { Métrica: 'Total de registros', Valor: unifState.result.length },
+    { Métrica: 'Planilhas',          Valor: loadedFiles.length },
+    { Métrica: 'Abas varridas',      Valor: loadedFiles.reduce((s, f) => s + f.wb.SheetNames.length, 0) },
+    { Métrica: 'Campos extraídos',   Valor: activeCols.length - 2 },
     { Métrica: 'Exportado em',       Valor: new Date().toLocaleString('pt-BR') },
   ]), 'Resumo');
 
-  XLSX.writeFile(wb2, `extrato_frete_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb2, `fretes_consolidados_${new Date().toISOString().slice(0, 10)}.xlsx`);
   toast('Exportado com sucesso!', 'ok');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP & PROGRESS — página 2
+// ─────────────────────────────────────────────────────────────────────────────
 function setUnifStep(n) {
-  ['usp1','usp2','usp3','usp4'].forEach((id, i) => {
+  ['usp1', 'usp2', 'usp3', 'usp4'].forEach((id, i) => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.classList.remove('active','done');
-    if (i+1 < n) el.classList.add('done');
-    else if (i+1 === n) el.classList.add('active');
+    el.classList.remove('active', 'done');
+    if      (i + 1 < n)  el.classList.add('done');
+    else if (i + 1 === n) el.classList.add('active');
   });
 }
 
-function unifProgress(pct, visible=true) {
+function unifProgress(pct, visible = true) {
   const track = document.getElementById('unifProgressTrack');
   const fill  = document.getElementById('unifProgressFill');
-  if (!track||!fill) return;
+  if (!track || !fill) return;
   track.classList.toggle('visible', visible && pct > 0);
   fill.style.width = pct + '%';
 }
+
+// Stubs para compatibilidade com o HTML (slider de threshold não é mais usado)
+function resetAndRedetect() { updateUnifReadyState(); }
+function redetectFields()   { updateUnifReadyState(); }
+function onSimThresholdChange(val) {
+  const el = document.getElementById('simThresholdVal');
+  if (el) el.textContent = val + '%';
+}
+
+
