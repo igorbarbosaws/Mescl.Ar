@@ -280,7 +280,27 @@ function removeColBring(id, rowIdx) {
   const lk = state.lookups.find(l => l.id === id);
   if (!lk) return;
   lk.cols.splice(rowIdx, 1);
-  document.getElementById(`lk-col-row-${id}-${rowIdx}`)?.remove();
+  // Re-render the entire cols list to keep DOM indices in sync
+  const colsEl = document.getElementById(`lk-cols-${id}`);
+  colsEl.innerHTML = '';
+  const saved = lk.cols.slice();
+  lk.cols = [];
+  saved.forEach(colCfg => {
+    const ri = lk.cols.length;
+    lk.cols.push({ colIdx: colCfg.colIdx, label: colCfg.label });
+    const row = document.createElement('div');
+    row.className = 'col-bring-row';
+    row.id = `lk-col-row-${id}-${ri}`;
+    row.innerHTML = `
+      <select onchange="setColBring(${id},${ri},'col',parseInt(this.value))">
+        ${lk.headers.map((h,i) => `<option value="${i}"${i===colCfg.colIdx?' selected':''}>${escHtml(h || 'col'+i)}</option>`).join('')}
+      </select>
+      <input class="col-label-input" type="text" placeholder="Nome no resultado (opcional)"
+        value="${escHtml(colCfg.label || '')}"
+        oninput="setColBring(${id},${ri},'label',this.value)">
+      <button class="btn-rm-col" onclick="removeColBring(${id},${ri})">✕</button>`;
+    colsEl.appendChild(row);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -506,15 +526,18 @@ function expandRange(cellVal, seps) {
 
 /**
  * expandChunk: tokenize expr with all seps, then walk tokens to expand ranges.
- * A token is: NUM | SEP (any word-sep) | HYPHEN (-) | COMMA/SEMICOLON
+ * A token is: NUM | SEP (any word-sep) | HYPHEN (-)
+ *
+ * Suffix resolution: when a number is shorter than the previous one,
+ * it is treated as an abbreviated suffix.
+ * e.g. "175205-206" → 175205, 175206
+ * e.g. "313963 a 967" → 313963..313967
+ * e.g. "175282 a 289-292" → 175282..175289, 175292
  */
 function expandChunk(expr, seps) {
   if (/^\d+\.0+$/.test(expr.trim())) return [String(Math.round(parseFloat(expr)))];
 
-  // Build regex alternating all word seps + hyphen + digits
-  // Seps already sorted longest first
   const sepAlts = seps.filter(s => s !== '-').map(s => escRe(s));
-  // hyphen handled separately as HYPHEN token
   const reStr = `(\\d+)` +
     (sepAlts.length ? `|(?:${sepAlts.join('|')})` : '') +
     `|(-)`;
@@ -523,14 +546,19 @@ function expandChunk(expr, seps) {
   const tokens = [];
   let m;
   while ((m = re.exec(expr)) !== null) {
-    if (m[1] !== undefined)                          tokens.push({ t: 'N', v: m[1] });
+    if (m[1] !== undefined)                                            tokens.push({ t: 'N', v: m[1] });
     else if (m[m.length - 1] !== undefined && m[m.length-1] === '-') tokens.push({ t: '-' });
-    else                                              tokens.push({ t: 'S' });
+    else                                                               tokens.push({ t: 'S' });
   }
   if (!tokens.length) return [];
 
+  // Completes a short suffix using the prefix of "start".
+  // e.g. start="175205", end="206" → "175206"
+  // e.g. start="313963", end="967" → "313967"
   function resolveEnd(start, end) {
-    return end.length < start.length ? start.slice(0, start.length - end.length) + end : end;
+    return end.length < start.length
+      ? start.slice(0, start.length - end.length) + end
+      : end;
   }
 
   const out = []; let i = 0; let lastFull = null;
@@ -538,6 +566,7 @@ function expandChunk(expr, seps) {
   while (i < tokens.length) {
     const tok = tokens[i];
     if (tok.t !== 'N') { i++; continue; }
+
     let fullA = tok.v;
     if (lastFull && fullA.length < lastFull.length) fullA = resolveEnd(lastFull, fullA);
 
@@ -772,13 +801,26 @@ function populateSelect(selId, headers, defaultVal) {
 // UI HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 function checkReady() {
-  const hasBase = state.baseData.length > 0;
+  const hasBase   = state.baseData.length > 0;
   const hasLookup = state.lookups.length > 0 && state.lookups.every(l => l.data.length > 0);
   document.getElementById('btnRun').disabled = !(hasBase && hasLookup);
-  updateProcessStatus(
-    hasBase && hasLookup ? 'Pronto para consolidar' : 'Aguardando configuração',
-    hasBase ? `Base: ${state.baseData.length} linhas · ${state.lookups.length} lookup(s)` : 'Carregue a planilha base para começar'
-  );
+
+  let title, sub;
+  if (!hasBase) {
+    title = 'Aguardando planilha base';
+    sub   = 'Carregue a planilha base para começar.';
+  } else if (state.lookups.length === 0) {
+    title = 'Aguardando fonte de lookup';
+    sub   = `Base: ${state.baseData.length} linhas — adicione ao menos uma fonte de lookup.`;
+  } else if (!hasLookup) {
+    const pending = state.lookups.filter(l => l.data.length === 0).length;
+    title = 'Aguardando upload dos lookups';
+    sub   = `Base: ${state.baseData.length} linhas — ${pending} lookup(s) ainda sem arquivo.`;
+  } else {
+    title = 'Pronto para consolidar';
+    sub   = `Base: ${state.baseData.length} linhas · ${state.lookups.length} lookup(s) carregado(s).`;
+  }
+  updateProcessStatus(title, sub);
 }
 
 function updateProcessStatus(title, sub) {
