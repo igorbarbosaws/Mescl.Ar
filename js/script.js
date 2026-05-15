@@ -882,7 +882,7 @@ function switchPage(n) {
   });
   const subtitles = { 1: '— Consolidador de Dados', 2: '— Unificador de Sheets' };
   document.getElementById('pageTitle').innerHTML =
-    `Mescl<em>.</em>ar <span style="font-weight:400;opacity:.5;font-size:.9em">${subtitles[n]}</span>`;
+    `Mescl<em>.</em>AR <span style="font-weight:400;opacity:.5;font-size:.9em">${subtitles[n]}</span>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
