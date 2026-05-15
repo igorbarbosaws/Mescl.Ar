@@ -977,16 +977,18 @@ function parseFreightSheet(raw, fileName, sheetName) {
   rec['Aba']     = sheetName;
 
   // ── Cabeçalho: Recibo, Rota e Data nas primeiras linhas ──────────
-  // A Porcelana coloca a data na linha 1 antes do cabeçalho
+  // Formato Delta: "Recibo n 0001 / 26   Transportadora X   Rota : 01 / 01"
+  // Pode estar distribuído em várias células da mesma linha, então juntamos tudo.
   for (let i = 0; i < Math.min(raw.length, 10); i++) {
     const line = (raw[i] || []).map(c => String(c ?? '').trim()).join(' ').trim();
 
     if (!rec['Recibo']) {
-      const m = line.match(/recibo\s+([\d]+\s*\/\s*[\d]+)/i);
+      // "Recibo n 0001 / 26" ou "Recibo nº 0001/26" ou "Recibo 0001/26"
+      const m = line.match(/recibo\s+n[º°.]?\s*([\d]+\s*\/\s*[\d]+)/i);
       if (m) rec['Recibo'] = m[1].replace(/\s/g, '');
     }
     if (!rec['Rota']) {
-      const m = line.match(/rota\s+([\d]+\s*\/\s*[\d]+)/i);
+      const m = line.match(/rota\s*:\s*([\d]+\s*\/\s*[\d]+)/i);
       if (m) rec['Rota'] = m[1].replace(/\s/g, '');
     }
     if (!rec['Data Emissão']) {
@@ -1048,14 +1050,21 @@ function parseFreightSheet(raw, fileName, sheetName) {
 
     // ── Campos de texto livre ────────────────────────────────────────
 
-    // Conhecimento/Fatura — Delta Plástico: "Conhecimento / Fatura" numa linha só
-    // Delta Porcelana: "Conhecimento:" e "Fatura:" em linhas separadas
+    // Conhecimento/Fatura — Delta: "Conhecimento / Fatura  167419-420-430-431/000001"
+    // O número após a última "/" é a Fatura (= número do Recibo).
+    // Tudo antes da última "/" é o Conhecimento.
     if (/conhecimento\s*[\/e]\s*fatura/i.test(labelRaw)) {
-      // Formato combinado: extrai tudo e divide pelo "/"
-      const full = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' / ');
-      const parts = full.split(/\s*\/\s*/);
-      if (!rec['Conhecimento'] && parts[0]) rec['Conhecimento'] = parts[0];
-      if (!rec['Fatura']       && parts[1]) rec['Fatura']       = parts[1];
+      const full = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
+      const lastSlash = full.lastIndexOf('/');
+      if (lastSlash !== -1) {
+        if (!rec['Conhecimento']) rec['Conhecimento'] = full.slice(0, lastSlash).trim();
+        if (!rec['Fatura'])       rec['Fatura']       = full.slice(lastSlash + 1).trim();
+      } else {
+        // sem barra: tudo vai para Conhecimento
+        if (!rec['Conhecimento']) rec['Conhecimento'] = full;
+      }
+      // Se o Recibo ainda não foi capturado no cabeçalho, usa a Fatura como fallback
+      if (!rec['Recibo'] && rec['Fatura']) rec['Recibo'] = rec['Fatura'];
     } else if (/^conhecimento\b/i.test(labelRaw) && !rec['Conhecimento']) {
       const v = row.slice(1).map(c => String(c ?? '').trim()).filter(Boolean).join(' ');
       if (v) rec['Conhecimento'] = v;
