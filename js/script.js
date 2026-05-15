@@ -3,11 +3,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const state = {
   baseWb: null, baseData: [], baseHeaders: [], baseMode: 'exact',
-  lookups: [],        // [{ id, wb, data, headers, keyCol, cols, mode, sep, name, color }]
-  result: [],         // merged rows
+  lookups: [],
+  result: [],
   filtered: [],
   activeFilter: 'all',
   searchTerm: '',
+  lookupColKeys: [],   // ordered list of lookup column names, set after consolidation
 };
 
 const COLORS = ['#3b82f6','#10b981','#a855f7','#f59e0b','#06b6d4','#f43f5e','#84cc16'];
@@ -365,25 +366,29 @@ function _consolidate() {
 
     // For each lookup, find all matching rows
     const lookupResults = state.lookups.map((lk, li) => {
-      const idx = indices[li];
-      const agg = document.getElementById(`lk-agg-${lk.id}`)?.value || 'join';
-      const prefix = document.getElementById(`lk-prefix-${lk.id}`)?.value || '';
+      const idx    = indices[li];
+      const agg    = document.getElementById(`lk-agg-${lk.id}`)?.value || 'join';
+      // Auto-prefix: use user-defined prefix if set, otherwise "LookupName_"
+      // This guarantees no key collision between different lookups
+      const userPrefix = (document.getElementById(`lk-prefix-${lk.id}`)?.value || '').trim();
+      const autoPrefix = userPrefix || (lk.name.replace(/\s+/g, '_') + '_');
 
       const hitRows = [];
       baseKeys.forEach(bk => {
-        // Match strategy: if lookup mode is 'range', expand lookup key
-        // If exact, just look up directly
         const hits = idx[bk];
         if (hits) hits.forEach(r => hitRows.push(r));
       });
 
       // Aggregate columns to bring
-      const colVals = {};
+      // Use a Map to preserve insertion order and avoid key collisions
+      const colVals = new Map();
       lk.cols.forEach((colCfg) => {
-        const colIdx  = colCfg.colIdx;
-        const colName = prefix + (colCfg.label || lk.headers[colIdx] || `col${colIdx}`);
-        const rawVals = hitRows.map(r => String(r[colIdx] ?? '').trim()).filter(Boolean);
-        const unique  = [...new Set(rawVals)];
+        const colIdx   = colCfg.colIdx;
+        // Column name: user label → original header → fallback
+        const rawLabel = (colCfg.label || lk.headers[colIdx] || `col${colIdx}`).trim();
+        const colName  = autoPrefix + rawLabel;
+        const rawVals  = hitRows.map(r => String(r[colIdx] ?? '').trim()).filter(Boolean);
+        const unique   = [...new Set(rawVals)];
 
         let val = '';
         if (agg === 'join')   val = unique.join(', ');
@@ -391,7 +396,7 @@ function _consolidate() {
         if (agg === 'first')  val = unique[0] || '';
         if (agg === 'last')   val = unique[unique.length - 1] || '';
         if (agg === 'count')  val = unique.length;
-        colVals[colName] = val;
+        colVals.set(colName, val);
       });
 
       return { hitCount: hitRows.length, colVals };
@@ -405,10 +410,13 @@ function _consolidate() {
                     : anyMatch  ? 'part'
                     : 'none';
 
-    // Build result row
+    // Build result row — column order: Base cols → Lookup1 cols → Lookup2 cols → ...
+    // Never appended at the end; each lookup's columns come right after the previous one.
     const outRow = { _status: status, _raw_key: String(rawCell ?? ''), _expanded_keys: baseKeys.join(', ') };
     state.baseHeaders.forEach((h, i) => { outRow[`Base_${h || 'col'+i}`] = baseRow[i] ?? ''; });
-    lookupResults.forEach(lr => { Object.assign(outRow, lr.colVals); });
+    lookupResults.forEach(lr => {
+      lr.colVals.forEach((val, key) => { outRow[key] = val; });
+    });
 
     result.push(outRow);
 
@@ -416,6 +424,16 @@ function _consolidate() {
   });
 
   progress(100);
+
+  // Store the exact ordered list of lookup column keys for render/export
+  state.lookupColKeys = state.lookups.flatMap((lk) => {
+    const userPrefix = (document.getElementById(`lk-prefix-${lk.id}`)?.value || '').trim();
+    const autoPrefix = userPrefix || (lk.name.replace(/\s+/g, '_') + '_');
+    return lk.cols.map(colCfg => {
+      const rawLabel = (colCfg.label || lk.headers[colCfg.colIdx] || `col${colCfg.colIdx}`).trim();
+      return autoPrefix + rawLabel;
+    });
+  });
 
   state.result   = result;
   state.filtered = result;
@@ -590,9 +608,13 @@ function renderTable(rows) {
   outer.style.display = 'block';
   empty.style.display = 'none';
 
-  const allKeys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
-  const baseKeys = allKeys.filter(k => k.startsWith('Base_'));
-  const lookupKeys = allKeys.filter(k => !k.startsWith('Base_'));
+  const allKeys    = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const baseKeys   = allKeys.filter(k => k.startsWith('Base_'));
+  // Lookup keys: use stored ordered list, filtered to what's actually in this result
+  // Falls back to anything not Base_ if lookupColKeys is empty (e.g. after filter)
+  const lookupKeys = state.lookupColKeys?.length
+    ? state.lookupColKeys.filter(k => allKeys.includes(k))
+    : allKeys.filter(k => !k.startsWith('Base_'));
 
   thead.innerHTML = '<tr>'
     + '<th>STATUS</th>'
@@ -608,8 +630,8 @@ function renderTable(rows) {
       ? '<span class="badge b-partial">PARCIAL</span>'
       : '<span class="badge b-none">SEM MATCH</span>';
 
-    const baseCells    = baseKeys.map(k    => `<td title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('');
-    const lookupCells  = lookupKeys.map(k  => `<td style="color:var(--cyan);opacity:.85" title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('');
+    const baseCells   = baseKeys.map(k  => `<td title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('');
+    const lookupCells = lookupKeys.map(k => `<td style="color:var(--cyan);opacity:.85" title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('');
 
     return `<tr>${badge ? `<td>${badge}</td>` : ''}<td style="font-family:var(--mono);font-size:.72rem;color:var(--muted2)">${escHtml(String(row._raw_key??''))}</td>${baseCells}${lookupCells}</tr>`;
   }).join('');
@@ -654,11 +676,20 @@ function exportResult() {
   const rows = state.filtered;
   if (!rows.length) { toast('Nenhum dado para exportar', 'err'); return; }
 
-  const allKeys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const allKeys    = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const baseKeys   = allKeys.filter(k => k.startsWith('Base_'));
+  const lookupKeys = state.lookupColKeys?.length
+    ? state.lookupColKeys.filter(k => allKeys.includes(k))
+    : allKeys.filter(k => !k.startsWith('Base_'));
+
+  // Build export in correct order: STATUS, CHAVE_BASE, base cols, lookup cols (by lookup order)
   const exportData = rows.map(row => {
-    const out = { STATUS: row._status === 'match' ? 'MATCH' : row._status === 'part' ? 'PARCIAL' : 'SEM MATCH',
-                  CHAVE_BASE: row._raw_key ?? '' };
-    allKeys.forEach(k => { out[k.replace('Base_','')] = row[k] ?? ''; });
+    const out = {
+      STATUS:     row._status === 'match' ? 'MATCH' : row._status === 'part' ? 'PARCIAL' : 'SEM MATCH',
+      CHAVE_BASE: row._raw_key ?? '',
+    };
+    baseKeys.forEach(k   => { out[k.replace('Base_', '')] = row[k] ?? ''; });
+    lookupKeys.forEach(k => { out[k] = row[k] ?? ''; });
     return out;
   });
 
@@ -797,4 +828,423 @@ function hexAlpha(hex, a) {
   const g = parseInt(hex.slice(3,5),16);
   const b = parseInt(hex.slice(5,7),16);
   return `rgba(${r},${g},${b},${a})`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE NAVIGATION
+// ─────────────────────────────────────────────────────────────────────────────
+function switchPage(n) {
+  [1,2].forEach(i => {
+    document.getElementById(`page${i}`).classList.toggle('active', i === n);
+    document.getElementById(`nav${i}`).classList.toggle('active', i === n);
+  });
+  const subtitles = { 1: '— Consolidador', 2: '— Unificador' };
+  document.getElementById('pageTitle').innerHTML =
+    `Mescl<em>.</em>ar <span style="font-weight:400;opacity:.5;font-size:.9em">${subtitles[n]}</span>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE 2 — EXTRATOR AUTOMÁTICO: STATE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/*
+  COMO FUNCIONA O MOTOR AUTOMÁTICO:
+  1. Para cada arquivo carregado, varre TODAS as abas automaticamente
+  2. Em cada aba, percorre TODAS as linhas procurando a "linha de cabeçalho"
+     (a linha mais densa em texto, sem ser a linha de título geral)
+  3. Coleta todos os nomes de campos encontrados
+  4. Agrupa campos com nomes semelhantes (Jaro-Winkler) numa única coluna
+  5. Constrói a tabela resultado com 1 linha por "bloco de dados" encontrado
+*/
+
+const unifState = {
+  files: [],      // [{ id, name, wb, sheets:[{sheetName, hRow, headers, data}] }]
+  fields: [],     // [{ id, label, sources:[{fileId,sheetName,colIdx}] }]
+  result: [],
+  filtered: [],
+};
+let unifFileCounter  = 0;
+let unifFieldCounter = 0;
+
+// ─── DRAG & DROP ──────────────────────────────────────────────────────────────
+function handleUnifDrop(e) {
+  e.preventDefault();
+  document.getElementById('unifDropZone').classList.remove('drag-over');
+  loadUnifFiles(e.dataTransfer.files);
+}
+
+function loadUnifFiles(fileList) {
+  Array.from(fileList).forEach(file => {
+    const id    = ++unifFileCounter;
+    const entry = { id, name: file.name, wb: null, sheets: [] };
+    unifState.files.push(entry);
+    renderUnifFileCard(entry);
+    readWorkbook(file, wb => {
+      entry.wb = wb;
+      // ── Scan ALL sheets automatically ──────────────────────────────
+      entry.sheets = [];
+      wb.SheetNames.forEach(sheetName => {
+        const ws  = wb.Sheets[sheetName];
+        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: false });
+        if (!raw || raw.length < 2) return;
+
+        // Auto-detect header row: find row with most non-empty text cells (likely the header)
+        const hRow = detectHeaderRow(raw);
+        const headers = (raw[hRow] || []).map(h => String(h).trim()).filter(Boolean);
+        const data    = raw.slice(hRow + 1).filter(r => r.some(c => c !== '' && c !== null && c !== undefined));
+
+        if (headers.length === 0 || data.length === 0) return;
+        entry.sheets.push({ sheetName, hRow, headers, data });
+      });
+
+      // Update card meta
+      const meta = document.getElementById(`uf-meta-${id}`);
+      const totalRows  = entry.sheets.reduce((s, sh) => s + sh.data.length, 0);
+      const totalSheets = entry.sheets.length;
+      if (meta) meta.textContent = `${totalSheets} aba(s) · ${totalRows} linhas`;
+      document.getElementById(`uf-card-${id}`)?.classList.add('loaded');
+
+      toast(`${file.name} — ${totalSheets} aba(s), ${totalRows} linhas`, 'ok');
+      redetectFields();
+    });
+  });
+  setUnifStep(1);
+}
+
+/**
+ * Auto-detect the best header row in a raw 2D array.
+ * Heuristic: look for the row with the most non-empty string cells
+ * that is NOT mostly numeric. Check first 10 rows only.
+ */
+function detectHeaderRow(raw) {
+  let bestRow = 0, bestScore = -1;
+  const checkRows = Math.min(raw.length - 1, 10);
+  for (let i = 0; i < checkRows; i++) {
+    const row  = raw[i] || [];
+    const nonEmpty = row.filter(c => c !== '' && c !== null && c !== undefined);
+    const textCount = nonEmpty.filter(c => isNaN(parseFloat(String(c)))).length;
+    const score = textCount * 2 + nonEmpty.length;
+    if (score > bestScore) { bestScore = score; bestRow = i; }
+  }
+  return bestRow;
+}
+
+function renderUnifFileCard(entry) {
+  const grid = document.getElementById('unifFilesGrid');
+  const card = document.createElement('div');
+  card.className = 'unif-file-card';
+  card.id = `uf-card-${entry.id}`;
+  const shortName = entry.name.length > 28 ? entry.name.slice(0,26)+'…' : entry.name;
+  card.innerHTML = `
+    <div class="unif-file-top">
+      <div class="unif-file-icon">📄</div>
+      <div style="flex:1">
+        <div class="unif-file-name">${escHtml(shortName)}</div>
+        <div class="unif-file-meta" id="uf-meta-${entry.id}">Lendo todas as abas…</div>
+      </div>
+      <button class="unif-file-rm" onclick="removeUnifFile(${entry.id})">✕</button>
+    </div>`;
+  grid.appendChild(card);
+}
+
+function removeUnifFile(id) {
+  unifState.files = unifState.files.filter(f => f.id !== id);
+  document.getElementById(`uf-card-${id}`)?.remove();
+  redetectFields();
+}
+
+// ─── FIELD DETECTION ENGINE ───────────────────────────────────────────────────
+
+/**
+ * strSimilarity: Jaro-Winkler + domain normalization for freight terms.
+ * Returns 0–1.
+ */
+function strSimilarity(a, b) {
+  // Normalize freight-specific synonyms first
+  const normFreight = s => s.toLowerCase()
+    .replace(/conhecimento[^a-z]*(de[^a-z]*frete|fatura)?s?/gi, 'ctefatura')
+    .replace(/\bcte\b/gi, 'ctefatura')
+    .replace(/\bfatura\b/gi, 'ctefatura')
+    .replace(/notas?\s*fiscais?/gi, 'notafiscal')
+    .replace(/\bnfs?\b/gi, 'notafiscal')
+    .replace(/valor\s*(da\s*)?(carga|mercadoria)/gi, 'valorcarga')
+    .replace(/frete\s*(s\/?|com\s*)?icms?/gi, 'fretericms')
+    .replace(/frete\s*s\/?icms?/gi, 'fretesicms')
+    .replace(/percurso|rota|trajeto|destino/gi, 'percurso')
+    .replace(/adiantamento|antecipo/gi, 'adiantamento')
+    .replace(/saldo\s*(a\s*pagar)?/gi, 'saldopagar')
+    .replace(/tipo\s*(de\s*)?ve[íi]culo/gi, 'tipoveiculo')
+    .replace(/[^a-z0-9]/gi, '');
+
+  const na = normFreight(a);
+  const nb = normFreight(b);
+  if (na === nb) return 1;
+  if (!na || !nb) return 0;
+
+  // Exact match after normalization
+  const len = Math.max(na.length, nb.length);
+  const matchDist = Math.max(0, Math.floor(len / 2) - 1);
+  const aM = new Array(na.length).fill(false);
+  const bM = new Array(nb.length).fill(false);
+  let matches = 0, transp = 0;
+  for (let i = 0; i < na.length; i++) {
+    const s = Math.max(0, i - matchDist);
+    const e = Math.min(i + matchDist + 1, nb.length);
+    for (let j = s; j < e; j++) {
+      if (bM[j] || na[i] !== nb[j]) continue;
+      aM[i] = bM[j] = true; matches++; break;
+    }
+  }
+  if (!matches) return 0;
+  let k = 0;
+  for (let i = 0; i < na.length; i++) {
+    if (!aM[i]) continue;
+    while (!bM[k]) k++;
+    if (na[i] !== nb[k]) transp++;
+    k++;
+  }
+  const jaro = (matches/na.length + matches/nb.length + (matches - transp/2)/matches) / 3;
+  let prefix = 0;
+  for (let i = 0; i < Math.min(4, na.length, nb.length); i++) {
+    if (na[i] === nb[i]) prefix++; else break;
+  }
+  return jaro + prefix * 0.1 * (1 - jaro);
+}
+
+function onSimThresholdChange(val) {
+  document.getElementById('simThresholdVal').textContent = val + '%';
+}
+
+function resetAndRedetect() {
+  unifState.fields = [];
+  redetectFields();
+}
+
+function redetectFields() {
+  unifState.fields = [];
+  const files = unifState.files.filter(f => f.sheets.length > 0);
+  if (!files.length) {
+    document.getElementById('unifDetectedSection').style.display = 'none';
+    return;
+  }
+
+  const threshold = parseInt(document.getElementById('simThreshold')?.value || 72) / 100;
+
+  // Collect every (fileId, sheetName, colIdx, headerName) tuple
+  const allCols = [];
+  files.forEach(f => {
+    f.sheets.forEach(sh => {
+      sh.headers.forEach((h, i) => {
+        if (h && h.trim()) allCols.push({ fileId: f.id, sheetName: sh.sheetName, colIdx: i, name: h.trim() });
+      });
+    });
+  });
+
+  // Greedy grouping by similarity
+  const fields = [];
+  allCols.forEach(col => {
+    let bestField = null, bestScore = 0;
+    fields.forEach(field => {
+      const score = strSimilarity(col.name, field.label);
+      if (score > bestScore) { bestScore = score; bestField = field; }
+    });
+
+    if (bestField && bestScore >= threshold) {
+      // Only add if this exact (file+sheet+col) combo not already in it
+      const already = bestField.sources.some(s => s.fileId===col.fileId && s.sheetName===col.sheetName && s.colIdx===col.colIdx);
+      if (!already) bestField.sources.push({ fileId:col.fileId, sheetName:col.sheetName, colIdx:col.colIdx });
+    } else {
+      fields.push({
+        id: ++unifFieldCounter,
+        label: col.name,
+        sources: [{ fileId:col.fileId, sheetName:col.sheetName, colIdx:col.colIdx }],
+      });
+    }
+  });
+
+  unifState.fields = fields;
+  renderDetectedTags(fields, files);
+  document.getElementById('unifDetectedSection').style.display = 'block';
+  setUnifStep(2);
+  document.getElementById('unifDetectedCount').textContent =
+    `${fields.length} campos · ${allCols.length} ocorrências em ${files.reduce((s,f)=>s+f.sheets.length,0)} aba(s)`;
+  document.getElementById('unifProcessTitle').textContent = 'Pronto para consolidar';
+  document.getElementById('unifProcessSub').textContent   = `${fields.length} campos detectados em ${files.length} planilha(s) — clique Consolidar.`;
+}
+
+function renderDetectedTags(fields, files) {
+  const wrap = document.getElementById('unifDetectedTags');
+  const BADGE_COLORS = ['#4361ee','#0a9e6e','#7c3aed','#d97706','#0096c7','#f43f5e','#84cc16'];
+  wrap.innerHTML = fields.map((f, idx) => {
+    const filesWithField = [...new Set(f.sources.map(s => s.fileId))].length;
+    const color = BADGE_COLORS[idx % BADGE_COLORS.length];
+    return `<span style="
+      display:inline-flex;align-items:center;gap:6px;
+      padding:5px 12px;border-radius:20px;font-size:0.72rem;font-family:var(--mono);
+      background:${color}18;border:1px solid ${color}44;color:${color};
+      cursor:default" title="Encontrado em ${f.sources.length} coluna(s) de ${filesWithField} planilha(s)">
+      ${escHtml(f.label)}
+      <span style="opacity:.6;font-size:.65rem">${f.sources.length}×</span>
+    </span>`;
+  }).join('');
+}
+
+// ─── CONSOLIDATION ENGINE ─────────────────────────────────────────────────────
+function runUnify() {
+  const files = unifState.files.filter(f => f.sheets.length > 0);
+  if (!files.length) { toast('Nenhuma planilha carregada', 'err'); return; }
+  if (!unifState.fields.length) { toast('Nenhum campo detectado', 'err'); return; }
+
+  setUnifStep(3);
+  unifProgress(0, true);
+  document.getElementById('unifProcessTitle').textContent = 'Consolidando…';
+
+  setTimeout(() => {
+    try {
+      _runUnify(files);
+    } catch(e) {
+      toast('Erro: ' + e.message, 'err');
+      console.error(e);
+      unifProgress(0, false);
+    }
+  }, 30);
+}
+
+function _runUnify(files) {
+  const fields  = unifState.fields;
+  const result  = [];
+  let processed = 0;
+  const totalSheets = files.reduce((s, f) => s + f.sheets.length, 0);
+
+  files.forEach(file => {
+    file.sheets.forEach(sheet => {
+      sheet.data.forEach(row => {
+        const outRow = {
+          _source: file.name,
+          _aba: sheet.sheetName,
+        };
+        fields.forEach(field => {
+          // Find source for this exact (file+sheet) combo
+          const src = field.sources.find(s => s.fileId === file.id && s.sheetName === sheet.sheetName);
+          outRow[field.label] = src !== undefined ? String(row[src.colIdx] ?? '').trim() : '';
+        });
+        // Only add row if it has at least one non-empty field value
+        const hasData = fields.some(f => outRow[f.label] !== '');
+        if (hasData) result.push(outRow);
+      });
+      processed++;
+      unifProgress(Math.round((processed / totalSheets) * 90));
+    });
+  });
+
+  unifProgress(100);
+  unifState.result   = result;
+  unifState.filtered = result;
+
+  // Stats
+  const emptyCount = result.reduce((s, row) =>
+    s + fields.filter(f => row[f.label] === '').length, 0);
+  document.getElementById('usvTotal').textContent  = result.length;
+  document.getElementById('usvFiles').textContent  = `${files.length} · ${totalSheets}`;
+  document.getElementById('usvCols').textContent   = fields.length;
+  document.getElementById('usvEmpty').textContent  = emptyCount;
+  document.getElementById('unifStatsGrid').style.display = 'grid';
+
+  renderUnifTable(result);
+  document.getElementById('unifResultsHdr').style.display = 'flex';
+  document.getElementById('btnUnifExport').style.display  = 'inline-flex';
+  setUnifStep(4);
+
+  document.getElementById('unifProcessTitle').textContent = `Consolidado — ${result.length} linhas`;
+  document.getElementById('unifProcessSub').textContent   = `${fields.length} campos · ${totalSheets} aba(s) de ${files.length} planilha(s)`;
+  toast(`Concluído — ${result.length} linhas · ${fields.length} campos`, 'ok');
+  setTimeout(() => unifProgress(0, false), 800);
+}
+
+function renderUnifTable(rows) {
+  const outer = document.getElementById('unifTableOuter');
+  if (!rows.length) { outer.style.display = 'none'; return; }
+  outer.style.display = 'block';
+
+  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+
+  document.getElementById('unifTHead').innerHTML = '<tr>'
+    + '<th style="color:var(--muted2);white-space:nowrap">ARQUIVO</th>'
+    + '<th style="color:var(--muted2);white-space:nowrap">ABA</th>'
+    + keys.map(k => `<th class="th-lookup">${escHtml(k)}</th>`).join('')
+    + '</tr>';
+
+  document.getElementById('unifTBody').innerHTML = rows.slice(0, 3000).map(row =>
+    '<tr>'
+    + `<td style="font-size:.68rem;color:var(--muted);white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(row._source)}">${escHtml(row._source)}</td>`
+    + `<td style="font-size:.68rem;color:var(--cyan);white-space:nowrap">${escHtml(row._aba||'')}</td>`
+    + keys.map(k => `<td title="${escHtml(String(row[k]??''))}">${escHtml(String(row[k]??''))}</td>`).join('')
+    + '</tr>'
+  ).join('');
+
+  if (rows.length > 3000) {
+    document.getElementById('unifTBody').innerHTML += `<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:16px;font-family:var(--mono);font-size:.72rem">…+${rows.length-3000} linhas. Exporte para ver tudo.</td></tr>`;
+  }
+}
+
+function unifSearch(val) {
+  const term = val.toLowerCase();
+  unifState.filtered = term
+    ? unifState.result.filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(term)))
+    : unifState.result;
+  renderUnifTable(unifState.filtered);
+}
+
+function exportUnif() {
+  const rows = unifState.filtered;
+  if (!rows.length) { toast('Nada para exportar', 'err'); return; }
+
+  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+
+  const exportData = rows.map(r => {
+    const obj = { ARQUIVO: r._source, ABA: r._aba };
+    keys.forEach(k => { obj[k] = r[k]; });
+    return obj;
+  });
+
+  const ws  = XLSX.utils.json_to_sheet(exportData);
+  ws['!cols'] = Array(Object.keys(exportData[0]).length).fill({ wch: 24 });
+
+  // Bold header row
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  for (let C = range.s.c; C <= range.e.c; C++) {
+    const cell = ws[XLSX.utils.encode_cell({ r: 0, c: C })];
+    if (cell) cell.s = { font: { bold: true } };
+  }
+
+  const wb2 = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb2, ws, 'Consolidado');
+  XLSX.utils.book_append_sheet(wb2, XLSX.utils.json_to_sheet([
+    { Métrica: 'Total de linhas',    Valor: unifState.result.length },
+    { Métrica: 'Planilhas',          Valor: unifState.files.length },
+    { Métrica: 'Abas varridas',      Valor: unifState.files.reduce((s,f)=>s+f.sheets.length,0) },
+    { Métrica: 'Campos detectados',  Valor: unifState.fields.length },
+    { Métrica: 'Exportado em',       Valor: new Date().toLocaleString('pt-BR') },
+  ]), 'Resumo');
+
+  XLSX.writeFile(wb2, `extrato_frete_${new Date().toISOString().slice(0,10)}.xlsx`);
+  toast('Exportado com sucesso!', 'ok');
+}
+
+function setUnifStep(n) {
+  ['usp1','usp2','usp3','usp4'].forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('active','done');
+    if (i+1 < n) el.classList.add('done');
+    else if (i+1 === n) el.classList.add('active');
+  });
+}
+
+function unifProgress(pct, visible=true) {
+  const track = document.getElementById('unifProgressTrack');
+  const fill  = document.getElementById('unifProgressFill');
+  if (!track||!fill) return;
+  track.classList.toggle('visible', visible && pct > 0);
+  fill.style.width = pct + '%';
 }

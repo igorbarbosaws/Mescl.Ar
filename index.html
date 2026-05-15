@@ -4,7 +4,7 @@
 
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mescl.ar — Consolidador de Planilhas</title>
+<title>Mescl.ar — Consolidador de Dados</title>
 
 <link rel="icon" type="image/x-icon" href="img/mesclar.ico">
 <link rel="stylesheet" href="css/style.css">
@@ -14,20 +14,47 @@
 </head>
 <body>
 <div id="app">
+<div class="shell">
 
-<!-- TOPBAR -->
-<header class="topbar">
-  <div class="logo">
-    <div class="logo-icon">⬡</div>
-    <span class="logo-name">Mescl.Ar</span>
-    <span class="logo-tag">Consolidador</span>
-  </div>
-  <div class="topbar-right">
-    <span class="clock" id="clock">--:--:--</span>
-  </div>
-</header>
+<!-- ── SIDEBAR NAV ──────────────────────────────────────────── -->
+<nav class="sidebar">
+  <div class="sidebar-logo">⬡</div>
 
-<div class="content">
+  <div class="nav-item active" id="nav1" onclick="switchPage(1)" title="">
+    <span>⇄</span>
+    <span class="nav-tooltip">Consolidador de Dados</span>
+  </div>
+
+  <div class="nav-item" id="nav2" onclick="switchPage(2)" title="">
+    <span>⊞</span>
+    <span class="nav-tooltip">Unificador de Planilhas</span>
+  </div>
+
+  <div class="sidebar-bottom">
+    <div class="nav-item" onclick="void(0)" style="opacity:.4;cursor:default">
+      <span>⚙</span>
+      <span class="nav-tooltip">Configurações (em breve)</span>
+    </div>
+  </div>
+</nav>
+
+<!-- ── MAIN AREA ─────────────────────────────────────────────── -->
+<div class="main-area">
+
+  <!-- TOPBAR -->
+  <header class="topbar">
+    <div class="logo">
+      <span class="logo-name" id="pageTitle">Mescl<em>.</em>AR <span style="font-weight:400;opacity:.5;font-size:.9em">— Consolidador de Dados</span></span>
+    </div>
+    <div class="topbar-right">
+      <span class="clock" id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <!-- ══════════════════ PAGE 1: CONSOLIDADOR ══════════════════ -->
+  <div class="page-area">
+  <div class="page active" id="page1">
+  <div class="content">
 
   <!-- STEPS -->
   <div class="steps-row">
@@ -115,12 +142,8 @@
       </div>
     </div>
     <div style="display:flex;gap:10px;flex-shrink:0;flex-wrap:wrap">
-      <button class="btn btn-primary" id="btnRun" onclick="runConsolidate()" disabled>
-        ▶ Consolidar
-      </button>
-      <button class="btn btn-success" id="btnExport" onclick="exportResult()" style="display:none">
-        ⬇ Exportar .xlsx
-      </button>
+      <button class="btn btn-primary" id="btnRun" onclick="runConsolidate()" disabled>▶ Consolidar</button>
+      <button class="btn btn-success" id="btnExport" onclick="exportResult()" style="display:none">⬇ Exportar .xlsx</button>
     </div>
   </div>
 
@@ -147,7 +170,121 @@
   </div>
   <div class="empty-state" id="emptyState">Nenhum resultado para esse filtro.</div>
 
-</div><!-- /content -->
+  </div><!-- /content page1 -->
+  </div><!-- /page1 -->
+
+  <!-- ══════════════════ PAGE 2: EXTRATOR AUTOMÁTICO ══════════════ -->
+  <div class="page" id="page2">
+  <div class="content">
+
+    <div class="steps-row">
+      <div class="step-pill active" id="usp1"><span class="step-dot"></span>Upload</div>
+      <div class="step-pill" id="usp2"><span class="step-dot"></span>Detectando</div>
+      <div class="step-pill" id="usp3"><span class="step-dot"></span>Consolidar</div>
+      <div class="step-pill" id="usp4"><span class="step-dot"></span>Exportar</div>
+    </div>
+
+    <!-- DESCRIPTION BANNER -->
+    <div style="background:var(--blue-dim);border:1px solid rgba(67,97,238,0.2);border-radius:var(--radius);padding:16px 20px;margin-bottom:28px;display:flex;gap:14px;align-items:flex-start">
+      <span style="font-size:1.4rem;flex-shrink:0">🤖</span>
+      <div>
+        <div style="font-size:0.85rem;font-weight:600;margin-bottom:4px">Extrator Automático de Relatórios de Frete</div>
+        <div style="font-size:0.72rem;color:var(--muted2);font-family:var(--mono);line-height:1.7">
+          Jogue quantas planilhas quiser. O sistema varre <strong>todas as abas</strong> de cada arquivo, detecta automaticamente campos como <em>Conhecimento/Fatura, Valor da Carga, Notas Fiscais, Percurso, KM, Tipo Veículo</em> e unifica tudo em um único relatório organizado por colunas — sem nenhuma configuração manual.
+        </div>
+      </div>
+    </div>
+
+    <!-- DROP ZONE -->
+    <div class="sec-hdr"><h2>01 — Planilhas de frete</h2><div class="sec-hdr-line"></div></div>
+
+    <div class="unif-drop-zone" id="unifDropZone"
+      onclick="document.getElementById('unifFilesInput').click()"
+      ondragover="event.preventDefault();this.classList.add('drag-over')"
+      ondragleave="this.classList.remove('drag-over')"
+      ondrop="handleUnifDrop(event)">
+      <input type="file" id="unifFilesInput" multiple accept=".xls,.xlsx,.ods,.csv" onchange="loadUnifFiles(this.files)">
+      <div class="unif-drop-icon">📁</div>
+      <div class="unif-drop-title">Arraste os arquivos aqui ou clique para selecionar</div>
+      <div class="unif-drop-sub">Múltiplos arquivos .xlsx/.xls — todas as abas serão varridas automaticamente</div>
+      <button class="btn btn-primary" style="margin:0 auto" onclick="event.stopPropagation();document.getElementById('unifFilesInput').click()">Selecionar arquivos</button>
+    </div>
+
+    <!-- FILE CARDS -->
+    <div class="unif-files-grid" id="unifFilesGrid"></div>
+
+    <!-- DETECTED FIELDS PREVIEW -->
+    <div id="unifDetectedSection" style="display:none">
+      <div class="sec-hdr" style="margin-top:28px"><h2>02 — Campos detectados automaticamente</h2><div class="sec-hdr-line"></div></div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <span style="font-size:0.8rem;font-weight:600">Campos que serão extraídos:</span>
+          <span style="font-size:0.7rem;font-family:var(--mono);color:var(--muted)" id="unifDetectedCount">—</span>
+          <button class="btn" style="margin-left:auto;font-size:0.73rem;padding:6px 14px" onclick="resetAndRedetect()">↺ Re-detectar</button>
+        </div>
+        <div id="unifDetectedTags" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      </div>
+
+      <!-- SIMILARITY SLIDER -->
+      <div class="group-cfg" style="margin-bottom:20px">
+        <h3>🔧 Ajuste fino da detecção</h3>
+        <div class="group-cfg-grid">
+          <div class="field" style="grid-column:1/3">
+            <label>Sensibilidade de agrupamento (quanto parecido um nome precisa ser para virar a mesma coluna)</label>
+            <div class="sim-slider-wrap">
+              <input type="range" min="40" max="100" value="72" id="simThreshold" oninput="onSimThresholdChange(this.value)">
+              <span class="sim-slider-val" id="simThresholdVal">72%</span>
+            </div>
+            <div style="font-size:0.68rem;font-family:var(--mono);color:var(--muted);margin-top:6px">
+              Baixo = agrupa mais (ex: "NF" e "Nota Fiscal" viram a mesma coluna) · Alto = mantém separado
+            </div>
+          </div>
+          <div class="field">
+            <button class="btn" style="width:100%;justify-content:center;margin-top:22px" onclick="redetectFields()">✦ Reaplicar threshold</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROCESS BAR -->
+      <div class="process-bar">
+        <div class="process-info">
+          <h3 id="unifProcessTitle">Pronto para consolidar</h3>
+          <p id="unifProcessSub">Verifique os campos detectados acima e clique em Consolidar.</p>
+          <div class="progress-track" id="unifProgressTrack">
+            <div class="progress-fill" id="unifProgressFill"></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-shrink:0;flex-wrap:wrap">
+          <button class="btn btn-primary" id="btnUnif" onclick="runUnify()">▶ Consolidar</button>
+          <button class="btn btn-success" id="btnUnifExport" onclick="exportUnif()" style="display:none">⬇ Exportar .xlsx</button>
+        </div>
+      </div>
+
+      <!-- STATS -->
+      <div class="stats-grid" id="unifStatsGrid" style="display:none">
+        <div class="stat-box s-total"><div class="stat-val" id="usvTotal">0</div><div class="stat-lbl">Linhas resultado</div></div>
+        <div class="stat-box s-match"><div class="stat-val" id="usvFiles">0</div><div class="stat-lbl">Planilhas · Abas</div></div>
+        <div class="stat-box s-pct">  <div class="stat-val" id="usvCols">0</div><div class="stat-lbl">Colunas detectadas</div></div>
+        <div class="stat-box s-none"> <div class="stat-val" id="usvEmpty">0</div><div class="stat-lbl">Campos vazios</div></div>
+      </div>
+
+      <!-- RESULTS -->
+      <div class="results-hdr" id="unifResultsHdr" style="display:none">
+        <input type="text" class="search-input" placeholder="Buscar em qualquer campo…" oninput="unifSearch(this.value)">
+        <button class="btn btn-success" onclick="exportUnif()" style="margin-left:auto">⬇ Exportar .xlsx</button>
+      </div>
+      <div class="table-outer" id="unifTableOuter" style="display:none">
+        <table><thead id="unifTHead"></thead><tbody id="unifTBody"></tbody></table>
+      </div>
+    </div><!-- /detected section -->
+
+  </div><!-- /content page2 -->
+  </div><!-- /page2 -->
+  </div><!-- /page-area -->
+
+</div><!-- /main-area -->
+</div><!-- /shell -->
 </div><!-- /app -->
 <div class="toast" id="toast"></div>
 
