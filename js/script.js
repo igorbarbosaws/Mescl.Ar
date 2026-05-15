@@ -1161,12 +1161,29 @@ function _runUnify(files) {
   setTimeout(() => unifProgress(0, false), 800);
 }
 
+// Priority columns: these appear first in the table (case-insensitive match)
+const PRIORITY_COLS = ['recibo'];
+
+function sortKeysByPriority(keys) {
+  const priority = [];
+  const rest = [];
+  keys.forEach(k => {
+    const norm = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (PRIORITY_COLS.some(p => norm === p || norm.startsWith(p))) {
+      priority.push(k);
+    } else {
+      rest.push(k);
+    }
+  });
+  return [...priority, ...rest];
+}
+
 function renderUnifTable(rows) {
   const outer = document.getElementById('unifTableOuter');
   if (!rows.length) { outer.style.display = 'none'; return; }
   outer.style.display = 'block';
 
-  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const keys = sortKeysByPriority(Object.keys(rows[0]).filter(k => !k.startsWith('_')));
 
   document.getElementById('unifTHead').innerHTML = '<tr>'
     + '<th style="color:var(--muted2);white-space:nowrap">ARQUIVO</th>'
@@ -1199,7 +1216,7 @@ function exportUnif() {
   const rows = unifState.filtered;
   if (!rows.length) { toast('Nada para exportar', 'err'); return; }
 
-  const keys = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+  const keys = sortKeysByPriority(Object.keys(rows[0]).filter(k => !k.startsWith('_')));
 
   const exportData = rows.map(r => {
     const obj = { ARQUIVO: r._source, ABA: r._aba };
