@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mescl.ar — Consolidador de Planilhas</title>
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="js/script.js"></script>
+
+</head>
+<body>
+<div id="app">
+
+<!-- TOPBAR -->
+<header class="topbar">
+  <div class="logo">
+    <div class="logo-icon">⬡</div>
+    <span class="logo-name">Mescl.Ar</span>
+    <span class="logo-tag">Consolidador</span>
+  </div>
+  <div class="topbar-right">
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+</header>
+
+<div class="content">
+
+  <!-- STEPS -->
+  <div class="steps-row">
+    <div class="step-pill active" id="sp1"><span class="step-dot"></span>Base</div>
+    <div class="step-pill" id="sp2"><span class="step-dot"></span>Lookups</div>
+    <div class="step-pill" id="sp3"><span class="step-dot"></span>Consolidar</div>
+    <div class="step-pill" id="sp4"><span class="step-dot"></span>Exportar</div>
+  </div>
+
+  <!-- ── SEÇÃO 1: PLANILHA BASE ──────────────────────────── -->
+  <div class="sec-hdr"><h2>01 — Planilha Base</h2><div class="sec-hdr-line"></div></div>
+
+  <div class="base-grid">
+    <!-- Upload -->
+    <div class="upload-zone" id="baseZone" onclick="document.getElementById('baseFile').click()">
+      <input type="file" id="baseFile" accept=".xls,.xlsx,.ods,.csv" onchange="loadBase(this)">
+      <div class="uz-icon">📂</div>
+      <div class="uz-title">Planilha Base</div>
+      <div class="uz-sub">Dados principais — a fonte de verdade</div>
+      <button class="btn" onclick.stop="document.getElementById('baseFile').click()">Selecionar arquivo</button>
+      <div class="uz-fname" id="baseFname" style="display:none"></div>
+    </div>
+
+    <!-- Config -->
+    <div>
+      <div class="field">
+        <label>Aba (sheet)</label>
+        <select id="baseSheet" onchange="reloadBase()" style="display:none"></select>
+        <div id="baseSheetNone" style="font-size:0.72rem;color:var(--muted);font-family:var(--mono)">— aguardando upload —</div>
+      </div>
+      <div class="field">
+        <label>Linha do cabeçalho</label>
+        <select id="baseHeader" onchange="reloadBase()">
+          <option value="0">Linha 1</option>
+          <option value="1">Linha 2</option>
+          <option value="2">Linha 3</option>
+          <option value="3">Linha 4</option>
+          <option value="4">Linha 5</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Coluna-chave (identificador único de cada linha)</label>
+        <select id="baseKey" onchange="onBaseKeyChange()">
+          <option value="">— carregue a planilha —</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Formato da chave</label>
+        <div class="mode-pills">
+          <button class="mode-pill active" data-mode="exact" onclick="setBaseMode('exact',this)">Valor exato</button>
+          <button class="mode-pill" data-mode="range" onclick="setBaseMode('range',this)">Intervalo / range</button>
+        </div>
+        <div class="range-opts" id="baseRangeOpts">
+          <label>Separadores de intervalo (marque todos que aparecem na planilha)</label>
+          <div class="sep-checks" id="baseSepChecks">
+            <label class="sep-chk"><input type="checkbox" value="a"    checked> <code>a</code></label>
+            <label class="sep-chk"><input type="checkbox" value="até">           <code>até</code></label>
+            <label class="sep-chk"><input type="checkbox" value="-"    checked> <code>-</code></label>
+            <label class="sep-chk"><input type="checkbox" value=",">            <code>,</code></label>
+            <label class="sep-chk"><input type="checkbox" value=";">            <code>;</code></label>
+          </div>
+          <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+            <label style="font-size:0.67rem;color:var(--muted);font-family:var(--mono);white-space:nowrap">Personalizado:</label>
+            <input type="text" id="baseSepCustom" placeholder="ex: e, ou, to" style="padding:5px 9px;background:var(--surface);border:1px solid var(--border2);color:var(--text);border-radius:6px;font-family:var(--mono);font-size:0.75rem;outline:none;flex:1">
+          </div>
+        </div>
+      </div>
+      <div id="baseStat" style="font-size:0.72rem;font-family:var(--mono);color:var(--muted);margin-top:6px"></div>
+    </div>
+  </div>
+
+  <!-- ── SEÇÃO 2: LOOKUPS ────────────────────────────────── -->
+  <div class="sec-hdr"><h2>02 — Fontes de Lookup</h2><div class="sec-hdr-line"></div></div>
+  <div id="lookupList"></div>
+  <button class="btn btn-add" onclick="addLookup()">＋ Adicionar fonte de lookup</button>
+
+  <!-- ── SEÇÃO 3: CONSOLIDAR ─────────────────────────────── -->
+  <div class="divider"></div>
+  <div class="process-bar">
+    <div class="process-info">
+      <h3 id="processTitle">Pronto para consolidar</h3>
+      <p id="processSub">Carregue a planilha base e ao menos uma fonte de lookup para continuar.</p>
+      <div class="progress-track" id="progressTrack">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary" id="btnRun" onclick="runConsolidate()" disabled>
+        ▶ Consolidar
+      </button>
+      <button class="btn btn-success" id="btnExport" onclick="exportResult()" style="display:none">
+        ⬇ Exportar .xlsx
+      </button>
+    </div>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats-grid" id="statsGrid">
+    <div class="stat-box s-total"><div class="stat-val" id="svTotal">0</div><div class="stat-lbl">Linhas base</div></div>
+    <div class="stat-box s-match"><div class="stat-val" id="svMatch">0</div><div class="stat-lbl">Com match ✓</div></div>
+    <div class="stat-box s-none" ><div class="stat-val" id="svNone">0</div><div class="stat-lbl">Sem match ✗</div></div>
+    <div class="stat-box s-pct"  ><div class="stat-val" id="svPct">—</div><div class="stat-lbl">Taxa de match</div></div>
+  </div>
+
+  <!-- RESULTS HEADER -->
+  <div class="results-hdr" id="resultsHdr">
+    <button class="filter-pill fp-active" id="fp_all"   onclick="setFilter('all')">Todos</button>
+    <button class="filter-pill fp-green"  id="fp_match" onclick="setFilter('match')">✓ Com match</button>
+    <button class="filter-pill fp-red"    id="fp_none"  onclick="setFilter('none')">✗ Sem match</button>
+    <button class="filter-pill fp-amber"  id="fp_part"  onclick="setFilter('part')">⚡ Parcial</button>
+    <input type="text" class="search-input" placeholder="Buscar em qualquer campo…" oninput="doSearch(this.value)">
+  </div>
+
+  <!-- TABLE -->
+  <div class="table-outer" id="tableOuter">
+    <table><thead id="tHead"></thead><tbody id="tBody"></tbody></table>
+  </div>
+  <div class="empty-state" id="emptyState">Nenhum resultado para esse filtro.</div>
+
+</div><!-- /content -->
+</div><!-- /app -->
+<div class="toast" id="toast"></div>
+
+</body>
+</html>
