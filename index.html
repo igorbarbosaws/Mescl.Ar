@@ -74,7 +74,7 @@
       <div class="uz-icon">📂</div>
       <div class="uz-title">Planilha Base</div>
       <div class="uz-sub">Dados principais — a fonte de verdade</div>
-      <button class="btn" onclick.stop="document.getElementById('baseFile').click()">Selecionar arquivo</button>
+      <button class="btn" onclick="event.stopPropagation();document.getElementById('baseFile').click()">Selecionar arquivo</button>
       <div class="uz-fname" id="baseFname" style="display:none"></div>
     </div>
 
